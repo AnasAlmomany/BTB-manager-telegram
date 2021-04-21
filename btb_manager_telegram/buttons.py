@@ -4,7 +4,8 @@ import subprocess
 from configparser import ConfigParser
 from datetime import datetime
 
-from btb_manager_telegram import logger, settings
+from btb_manager_telegram import BOUGHT, BUYING, SELLING, SOLD, logger, settings
+from btb_manager_telegram.binance_api_utils import get_current_price
 from btb_manager_telegram.utils import (
     find_and_kill_binance_trade_bot_process,
     format_float,
@@ -286,7 +287,7 @@ def start_bot():
     logger.info("Start bot button pressed.")
 
     message = "⚠ Binance Trade Bot is already running\."
-    if not get_binance_trade_bot_process():
+    if not find_process():
         if os.path.exists(os.path.join(settings.ROOT_PATH, "binance_trade_bot/")):
             subprocess.call(
                 f"cd {settings.ROOT_PATH} && $(which python3) -m binance_trade_bot &",
@@ -343,7 +344,7 @@ def delete_db():
     message = "⚠ Please stop Binance Trade Bot before deleting the database file\."
     delete = False
     db_file_path = os.path.join(settings.ROOT_PATH, "data/crypto_trading.db")
-    if not get_binance_trade_bot_process():
+    if not find_process():
         if os.path.exists(db_file_path):
             message = (
                 "Are you sure you want to delete the database file and clear the logs?"
@@ -362,7 +363,7 @@ def edit_user_cfg():
     message = "⚠ Please stop Binance Trade Bot before editing user configuration file\."
     edit = False
     user_cfg_file_path = os.path.join(settings.ROOT_PATH, "user.cfg")
-    if not get_binance_trade_bot_process():
+    if not find_process():
         if os.path.exists(user_cfg_file_path):
             with open(user_cfg_file_path) as f:
                 message = (
@@ -389,7 +390,7 @@ def edit_coin():
     message = "⚠ Please stop Binance Trade Bot before editing the coin list\."
     edit = False
     coin_file_path = os.path.join(settings.ROOT_PATH, "supported_coin_list")
-    if not get_binance_trade_bot_process():
+    if not find_process():
         if os.path.exists(coin_file_path):
             with open(coin_file_path) as f:
                 message = (
@@ -460,3 +461,103 @@ def update_btb():
     else:
         message = "Error while trying to fetch Binance Trade Bot version information\."
     return [message, upd]
+
+
+def panic_btn():
+    logger.info("Panic Button button pressed.")
+
+    # Check if open orders / not in usd
+    db_file_path = os.path.join(settings.ROOT_PATH, "data/crypto_trading.db")
+    if not os.path.exists(db_file_path):
+        return ["ERROR: Database file not found\.", -1]
+
+    user_cfg_file_path = os.path.join(settings.ROOT_PATH, "user.cfg")
+    if not os.path.exists(user_cfg_file_path):
+        return ["ERROR: `user.cfg` file not found\.", -1]
+
+    try:
+        con = sqlite3.connect(db_file_path)
+        cur = con.cursor()
+
+        # Get last trade
+        try:
+            cur.execute(
+                """SELECT alt_coin_id, crypto_coin_id, selling, state, alt_trade_amount, crypto_trade_amount FROM trade_history ORDER BY datetime DESC LIMIT 1;"""
+            )
+            (
+                alt_coin_id,
+                crypto_coin_id,
+                selling,
+                state,
+                alt_trade_amount,
+                crypto_trade_amount,
+            ) = cur.fetchone()
+
+            if not selling:
+                price_old = crypto_trade_amount / alt_trade_amount
+                price_now = get_current_price(alt_coin_id, crypto_coin_id)
+                if state == "COMPLETE":
+                    return [
+                        f"You are currently holding `{round(alt_trade_amount, 6)}` *{alt_coin_id}* bought for {round(crypto_trade_amount, 2)} *{crypto_coin_id}*.\n\n"
+                        f"Exchange rate when bought:\n"
+                        f"`{round(price_old, 4)}` *{crypto_coin_id}*/*{alt_coin_id}*\n\n"
+                        f"Current exchange rate:\n"
+                        f"`{round(price_now, 4)}` *{crypto_coin_id}*/*{alt_coin_id}*\n\n"
+                        f"Current value:\n"
+                        f"`{round(price_now * alt_trade_amount, 4)}` *{crypto_coin_id}*\n\n"
+                        f"Change:\n"
+                        f"`{round(100 - (price_old / price_now) * 100, 2)}` *%*\n\n"
+                        f"Would you like to stop _Binance Trade Bot_ and sell at market price?".replace(
+                            ".", "\."
+                        ),
+                        BOUGHT,
+                    ]
+                else:
+                    return [
+                        f"You have an open buy order of `{alt_trade_amount}` *{alt_coin_id}* for `{crypto_trade_amount}` *{crypto_coin_id}*.\n\n"
+                        f"Limit buy at price:\n"
+                        f"`{round(price_old, 4)}` *{crypto_coin_id}*/*{alt_coin_id}*\n\n"
+                        f"Current exchange rate:\n"
+                        f"`{round(price_now, 4)}` *{crypto_coin_id}*/*{alt_coin_id}*\n\n"
+                        f"Change:\n"
+                        f"`{round(100 - (price_old / price_now) * 100, 2)}` *%*\n\n"
+                        f"Would you like to stop _Binance Trade Bot_ and cancel the open order?".replace(
+                            ".", "\."
+                        ),
+                        BUYING,
+                    ]
+            else:
+                if state == "COMPLETE":
+                    return [
+                        f"Your balance is already in *{crypto_coin_id}*.\n\n"
+                        f"Would you like to stop _Binance Trade Bot_?".replace(
+                            ".", "\."
+                        ),
+                        SOLD,
+                    ]
+                else:
+                    price_old = crypto_trade_amount / alt_trade_amount
+                    price_now = get_current_price(alt_coin_id, crypto_coin_id)
+                    return [
+                        f"You have an open sell order of `{alt_trade_amount}` *{alt_coin_id}* for `{crypto_trade_amount}` *{crypto_coin_id}*.\n\n"
+                        f"Limit sell at price:\n"
+                        f"`{round(price_old, 4)}` *{crypto_coin_id}*/*{alt_coin_id}*\n\n"
+                        f"Current exchange rate:\n"
+                        f"`{round(price_now, 4)}` *{crypto_coin_id}*/*{alt_coin_id}*\n\n"
+                        f"Change:\n"
+                        f"`{round(100 - (price_old / price_now) * 100, 2)}` *%*\n\n"
+                        f"Would you like to stop _Binance Trade Bot_ and cancel the open order?".replace(
+                            ".", "\."
+                        ),
+                        SELLING,
+                    ]
+
+            con.close()
+        except Exception:
+            con.close()
+            return [
+                "❌ Something went wrong, the panic button is not working at this time\.",
+                -1,
+            ]
+    except Exception:
+        return ["❌ Unable to perform actions on the database\.", -1]
